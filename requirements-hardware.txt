@@ -1,0 +1,10 @@
+-r requirements.txt
+pyvisa>=1.14
+pyvisa-py>=0.7
+pyserial>=3.5
+pyusb>=1.3
+vortran-lbl==1.0.0
+psutil>=6.0
+zeroconf>=0.136
+pixelinkWrapper>=1.5.0
+pythonnet>=3.0

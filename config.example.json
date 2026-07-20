@@ -1,0 +1,165 @@
+{
+  "mode": "simulation",
+  "results_dir": "results",
+  "safety": {
+    "hardware_armed": false,
+    "min_high_v": 3.5,
+    "max_high_v": 5.0,
+    "min_pulse_width_s": 1e-8,
+    "max_pulse_width_s": 0.01,
+    "max_optical_power_mw": 160.0,
+    "max_pulses": 1000,
+    "max_burst_duration_s": 10.0,
+    "max_points": 10000
+  },
+  "awg": {
+    "model": "T3AFG350",
+    "visa_resource": "",
+    "channel": 1,
+    "load_ohm": 50,
+    "high_v": 5.0,
+    "low_v": 0.0,
+    "timeout_ms": 5000
+  },
+  "laser": {
+    "visa_resource": "",
+    "baud_rate": 19200,
+    "timeout_ms": 5000,
+    "emission_settle_s": 5.5,
+    "peak_power_mw": 10.0,
+    "power_calibration": []
+  },
+  "scope": {
+    "visa_resource": "",
+    "channel": 1,
+    "timeout_ms": 10000,
+    "input_impedance": "FIFTy",
+    "coupling": "DC",
+    "bandwidth_limit": "OFF",
+    "vertical_scale_v_div": 1.0,
+    "vertical_offset_v": 0.0,
+    "trigger_source": "CHAN1",
+    "trigger_level_v": 0.1,
+    "trigger_slope": "POSitive",
+    "window_factor": 6.0,
+    "acquisition_timeout_s": 2.0
+  },
+  "photodetector": {
+    "model": "Thorlabs DET02AFC",
+    "wavelength_range_nm": [400.0, 1100.0],
+    "bandwidth_hz": 1e9,
+    "rise_time_s": 1e-9,
+    "minimum_load_ohm": 50.0,
+    "maximum_peak_power_mw": 18.0,
+    "maximum_output_v_50ohm": 3.3
+  },
+  "stage": {
+    "serial_number": "",
+    "kinesis_dir": "C:/Program Files/Thorlabs/Kinesis",
+    "axis_channels": {"x": 1, "y": 2, "z": 3},
+    "range_um": {"x": [0.0, 20.0], "y": [0.0, 20.0], "z": [0.0, 20.0]},
+    "origin_um": {"x": 10.0, "y": 10.0, "z": 10.0},
+    "max_voltage_v": 75.0,
+    "settle_s": 0.3,
+    "position_tolerance_um": 0.1,
+    "move_timeout_s": 5.0,
+    "calibrated": false,
+    "controller_span_units": [0.0, 100.0],
+    "axis_inverted": {"x": false, "y": false, "z": false},
+    "focus_plane": {"enabled": false, "a": 0.0, "b": 0.0, "c": 10.0, "rms_um": 0.0, "r_squared": 0.0}
+  },
+  "camera": {
+    "serial_number": 0,
+    "exposure_ms": 10.0,
+    "gain_db": 0.0,
+    "roi": [0, 0, 0, 0],
+    "auto_exposure": true,
+    "target_peak_fraction": 0.85,
+    "min_exposure_ms": 0.01,
+    "max_exposure_ms": 100.0,
+    "max_auto_exposure_steps": 4,
+    "capture_retries": 4,
+    "calibration_step_um": 1.0,
+    "calibration_min_snr": 8.0,
+    "calibration_max_return_error_px": 1.0,
+    "calibration_max_anisotropy": 1.2,
+    "stage_to_pixel_px_per_um": [],
+    "pixel_to_stage_um_per_px": [],
+    "um_per_pixel": 0.0
+  },
+  "guide": {
+    "detection_roi": [32, 32, 192, 192],
+    "tracking_roi_size_px": 96,
+    "length_um": 3.0,
+    "max_step_um": 0.25,
+    "autofocus_span_um": 2.0,
+    "autofocus_samples": 7,
+    "spot_pixel": [128.0, 128.0],
+    "alignment_tolerance_um": 0.08,
+    "max_correction_um": 0.5,
+    "max_alignment_iterations": 3,
+    "min_confidence": 0.25,
+    "phase_roi_radius_px": 8.0,
+    "phase_change_threshold_percent": 5.0
+  },
+  "sample": {
+    "wavelength_nm": 639.0,
+    "spot_radius_um": 0.6,
+    "ambient_c": 20.0,
+    "phase": "amorphous",
+    "optical_k": {"amorphous": 0.642863, "crystalline": 1.898485},
+    "optical_materials": {
+      "SiO2": {"n": 1.457, "k": 0.0},
+      "Si": {"n": 3.87, "k": 0.016},
+      "Sb2Se3": {
+        "amorphous": {"n": 4.112396, "k": 0.642863},
+        "crystalline": {"n": 5.284340, "k": 1.898485}
+      }
+    },
+    "optical_layers": [
+      {"name": "SiO2 cap", "material": "SiO2", "thickness_nm": 200.0},
+      {"name": "Sb2Se3", "material": "Sb2Se3", "thickness_nm": 40.0},
+      {"name": "Si waveguide", "material": "Si", "thickness_nm": 220.0},
+      {"name": "SiO2 BOX", "material": "SiO2", "thickness_nm": 3000.0}
+    ],
+    "optical_substrate": "Si",
+    "sb2se3_thickness_nm": 40.0,
+    "effective_thermal_conductivity_w_mk": 1.4,
+    "effective_areal_heat_capacity_j_m2k": 0.9,
+    "crystallization_c": 200.0,
+    "melting_c": 610.0,
+    "axisymmetric": {
+      "radial_cells": 48,
+      "radial_extent_um": 250.0,
+      "first_cell_fraction": 0.125
+    },
+    "thermal_materials": {
+      "SiO2": {"k_w_mk": 1.38, "density_kg_m3": 2200.0, "cp_j_kgk": 703.0},
+      "Si": {"k_w_mk": 130.0, "density_kg_m3": 2329.0, "cp_j_kgk": 700.0},
+      "Sb2Se3": {
+        "amorphous": {"k_w_mk": 0.22, "density_kg_m3": 5840.0, "cp_j_kgk": 263.0},
+        "crystalline": {"k_w_mk": 0.72, "density_kg_m3": 5840.0, "cp_j_kgk": 263.0}
+      }
+    },
+    "thermal_layers": [
+      {"name": "SiO2 cap", "material": "SiO2", "thickness_nm": 200.0, "cells": 4},
+      {"name": "Sb2Se3", "material": "Sb2Se3", "thickness_nm": 40.0, "cells": 2},
+      {"name": "Si waveguide", "material": "Si", "thickness_nm": 220.0, "cells": 4},
+      {"name": "SiO2 BOX", "material": "SiO2", "thickness_nm": 3000.0, "cells": 12},
+      {"name": "Si substrate", "material": "Si", "thickness_nm": 20000.0, "cells": 60, "stretch": 100.0}
+    ]
+  },
+  "simulation": {
+    "seed": 639,
+    "camera_um_per_pixel": 0.08,
+    "focus_z_um": 10.0,
+    "spot_waist_px": 5.0,
+    "rayleigh_range_um": 1.2,
+    "spot_peak_counts": 140.0,
+    "guide_angle_deg": 20.0,
+    "guide_width_um": 0.5,
+    "guide_contrast_counts": 45.0,
+    "focus_slope_x": 0.03,
+    "focus_slope_y": -0.015
+  }
+}

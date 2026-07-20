@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.codex_tmp_*/
+config.json
+results/
+offline/
+vendor_installers/
+tmp/
+build/
+dist/
+release/
+docs/presentacion_*
+docs/assets/

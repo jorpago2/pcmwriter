@@ -81,7 +81,7 @@ The generated `offline/` and `vendor_installers/` directories remain local and a
 
 ## Safety model
 
-PCMWriter applies software safeguards in addition to â€” never instead of â€” physical laser safety controls:
+PCMWriter applies software safeguards in addition to — never instead of — physical laser safety controls:
 
 - hardware starts disarmed on every application launch;
 - preflight must succeed before a session can be armed;
@@ -196,5 +196,4 @@ Never publish serial numbers, local paths, calibration files containing sensitiv
 
 PCMWriter is released under the [MIT License](LICENSE).
 
-Developed at the Nanophotonics Technology Center (NTC), Universitat PolitÃ¨cnica de ValÃ¨ncia.
-
+Developed at the Nanophotonics Technology Center (NTC), Universitat Politècnica de València.
