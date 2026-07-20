@@ -5,14 +5,14 @@ Set-Location $PSScriptRoot
 New-Item -ItemType Directory -Force "offline\wheels", "vendor_installers" | Out-Null
 
 $python = ".venv\Scripts\python.exe"
-if (-not (Test-Path $python)) { throw "Ejecuta primero .\install_lab.ps1 en este ordenador." }
+if (-not (Test-Path $python)) { throw "Run .\install_lab.ps1 on this computer first." }
 & $python -c "import sys; raise SystemExit(sys.version_info[:2] != (3, 13))"
 if ($LASTEXITCODE -ne 0) {
-    throw "El kit offline esta fijado a Python 3.13 x64."
+    throw "The offline kit is pinned to Python 3.13 x64."
 }
 
 & $python -m pip download --only-binary=:all: --dest "offline\wheels" -r requirements-hardware.txt
-if ($LASTEXITCODE -ne 0) { throw "No se han podido descargar todas las ruedas." }
+if ($LASTEXITCODE -ne 0) { throw "Could not download all Python wheels." }
 
 $downloads = @(
     @{
@@ -33,11 +33,11 @@ $downloads = @(
 )
 foreach ($item in $downloads) {
     if (-not (Test-Path $item.Path)) {
-        Write-Host "Descargando $(Split-Path $item.Path -Leaf)..."
+        Write-Host "Downloading $(Split-Path $item.Path -Leaf)..."
         Invoke-WebRequest -UseBasicParsing $item.Url -OutFile $item.Path
     }
     if ($item.Sha256 -and (Get-FileHash $item.Path -Algorithm SHA256).Hash -ne $item.Sha256) {
-        throw "Checksum incorrecto: $($item.Path)"
+        throw "Checksum mismatch: $($item.Path)"
     }
 }
 
@@ -51,5 +51,5 @@ if ($OpenVendorPages) {
     Start-Process "https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html"
 }
 
-Write-Host "Kit Python, Pixelink y Kinesis listo."
-Write-Host "NI-VISA es opcional; pyvisa-py cubre serie, USB y red."
+Write-Host "Python, Pixelink, and Kinesis kit is ready."
+Write-Host "NI-VISA is optional; pyvisa-py supports serial, USB, and network connections."
