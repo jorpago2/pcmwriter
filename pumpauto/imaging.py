@@ -225,7 +225,7 @@ def measure_spot(
     background: np.ndarray | None = None,
     roi_radius_px: int = 24,
 ) -> SpotMeasurement:
-    """Measure Gaussian 1/e2 radii from the brightest camera channel."""
+    """Measure Gaussian 1/e2 radii, isolating the red pump spot in RGB images."""
     if pixel_size_um <= 0 or image.ndim not in {2, 3}:
         raise ValueError("Invalid image or pixel calibration.")
     if background is not None and background.shape != image.shape:
@@ -240,10 +240,23 @@ def measure_spot(
     medians = np.median(flat, axis=0)
     contrasts = np.max(flat, axis=0) - medians
     channel_index = int(np.argmax(contrasts))
-    signal = channels[..., channel_index].astype(float)
-    if background_channels is not None:
-        signal -= background_channels[..., channel_index].astype(float)
-    signal -= medians[channel_index]
+    if image.ndim == 3 and image.shape[2] >= 3:
+        signal = channels[..., 0].astype(float) - 0.5 * (
+            channels[..., 1].astype(float) + channels[..., 2].astype(float)
+        )
+        sampled_signal = sampled[..., 0] - 0.5 * (sampled[..., 1] + sampled[..., 2])
+        if background_channels is not None:
+            signal -= background_channels[..., 0].astype(float) - 0.5 * (
+                background_channels[..., 1].astype(float)
+                + background_channels[..., 2].astype(float)
+            )
+        signal -= float(np.median(sampled_signal))
+        channel_index = 0
+    else:
+        signal = channels[..., channel_index].astype(float)
+        if background_channels is not None:
+            signal -= background_channels[..., channel_index].astype(float)
+        signal -= medians[channel_index]
     peak_y, peak_x = np.unravel_index(int(np.argmax(signal)), signal.shape)
     y0, y1 = max(0, peak_y - roi_radius_px), min(signal.shape[0], peak_y + roi_radius_px + 1)
     x0, x1 = max(0, peak_x - roi_radius_px), min(signal.shape[1], peak_x + roi_radius_px + 1)
@@ -252,7 +265,7 @@ def measure_spot(
     absolute_deviation = np.abs(noise_sample - np.median(noise_sample))
     noise = max(1e-9, 1.4826 * float(np.median(absolute_deviation)))
     peak = float(roi.max())
-    threshold = max(3.0 * noise, 0.01 * peak)
+    threshold = max(5.0 * noise, 0.20 * peak)
     weights = np.where(roi >= threshold, roi, 0.0)
     total = float(weights.sum())
     if peak / noise < 5.0 or total <= 0:
@@ -270,6 +283,12 @@ def measure_spot(
     eigenvalues, eigenvectors = np.linalg.eigh(covariance)
     if eigenvalues[0] <= 0:
         raise ValueError("The measured spot has no valid width.")
+    threshold_fraction = min(0.95, threshold / peak)
+    log_fraction = -float(np.log(threshold_fraction))
+    retained_moment = (
+        1.0 - threshold_fraction * (1.0 + log_fraction)
+    ) / (1.0 - threshold_fraction)
+    radius_correction = 1.0 / np.sqrt(retained_moment)
     major_vector = eigenvectors[:, 1]
     dtype_peak = 1.0 if np.issubdtype(image.dtype, np.floating) and image.max() <= 1.5 else float(
         np.iinfo(image.dtype).max if np.issubdtype(image.dtype, np.integer) else 255.0
@@ -279,8 +298,8 @@ def measure_spot(
     return SpotMeasurement(
         x_px=cx,
         y_px=cy,
-        w_major_px=2.0 * float(np.sqrt(eigenvalues[1])),
-        w_minor_px=2.0 * float(np.sqrt(eigenvalues[0])),
+        w_major_px=2.0 * float(np.sqrt(eigenvalues[1])) * radius_correction,
+        w_minor_px=2.0 * float(np.sqrt(eigenvalues[0])) * radius_correction,
         angle_deg=degrees(atan2(float(major_vector[1]), float(major_vector[0]))),
         snr=peak / noise,
         saturated=saturated,
@@ -300,10 +319,27 @@ def fit_focus(z_positions_um: list[float], measurements: list[SpotMeasurement]) 
     residual = float(np.sum((metric - predicted) ** 2))
     total = float(np.sum((metric - metric.mean()) ** 2))
     r_squared = 1.0 - residual / total if total > 0 else 0.0
-    measured_best = float(z[int(np.argmin(metric))])
-    vertex = -coefficients[1] / (2.0 * coefficients[0]) if coefficients[0] > 0 else measured_best
-    best = float(vertex) if r_squared >= 0.8 and z.min() <= vertex <= z.max() else measured_best
-    return FocusResult(best, measured_best, r_squared, tuple(measurements), tuple(z_positions_um))
+    best_index = int(np.argmin(metric))
+    measured_best = float(z[best_index])
+    if best_index in {0, len(z) - 1}:
+        raise ValueError(
+            "Focus not bracketed: the smallest spot is at the edge of the Z sweep. "
+            "Recenter or widen the sweep."
+        )
+    if coefficients[0] <= 0 or not np.isfinite(r_squared) or r_squared < 0.8:
+        raise ValueError(
+            f"Unreliable autofocus curve (R^2={r_squared:.3f}); the stage was returned "
+            "to its starting position."
+        )
+    vertex = -coefficients[1] / (2.0 * coefficients[0])
+    if not z.min() < vertex < z.max():
+        raise ValueError(
+            "Focus not bracketed: the fitted minimum lies outside the Z sweep. "
+            "Recenter or widen the sweep."
+        )
+    return FocusResult(
+        float(vertex), measured_best, r_squared, tuple(measurements), tuple(z_positions_um)
+    )
 
 
 def autofocus(

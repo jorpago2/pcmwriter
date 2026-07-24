@@ -16,7 +16,7 @@ import numpy as np
 
 from pumpauto.config import DEFAULT_CONFIG, ConfigError, load_config, save_config, validate_config
 from pumpauto.colorimetry import _predict_phase_colors_cached, predict_phase_colors
-from pumpauto.imaging import autofocus, calibrate_pixel_scale, fit_focus_plane, focus_corrected, measure_spot
+from pumpauto.imaging import autofocus, calibrate_pixel_scale, fit_focus, fit_focus_plane, focus_corrected, measure_spot
 from pumpauto.instruments import (
     HardwareUnavailable,
     RigolDG1062Z,
@@ -138,6 +138,7 @@ class CoreTests(unittest.TestCase):
         config = deepcopy(DEFAULT_CONFIG)
         config["mode"] = "hardware"
         validate_config(config)
+        self.assertEqual(config["camera"]["min_exposure_ms"], 4.183)
         config["safety"]["hardware_armed"] = True
         with self.assertRaisesRegex(ConfigError, "Missing hardware resources"):
             validate_config(config)
@@ -179,6 +180,12 @@ class CoreTests(unittest.TestCase):
         changed = deepcopy(base)
         changed["awg"]["visa_resource"] = "USB::CHANGED"
         self.assertNotEqual(PumpAutoUI._preflight_key(base), PumpAutoUI._preflight_key(changed))
+        operational = deepcopy(base)
+        operational["camera"]["exposure_ms"] = 50.0
+        operational["scope"]["trigger_level_v"] = 0.5
+        operational["laser"]["peak_power_mw"] = 20.0
+        operational["stage"]["position_tolerance_um"] = 0.2
+        self.assertEqual(PumpAutoUI._preflight_key(base), PumpAutoUI._preflight_key(operational))
 
     def test_ui_workers_are_joined_and_automation_reserves_devices(self) -> None:
         worker_source = inspect.getsource(PumpAutoUI._spawn_worker)
@@ -218,9 +225,11 @@ class CoreTests(unittest.TestCase):
         ui.awg_output_enabled = True
         ui.awg_pulse_configured = True
         ui._set_cw_controls = Mock()
+        ui._set_ttl_controls = Mock()
         ui._set_live_stage_controls = Mock()
         ui.awg_status = Mock()
         ui.cw_status = Mock()
+        ui.ttl_status = Mock()
         ui.scope_status = Mock()
         ui.live_stage_position = Mock()
         ui._write_log = Mock()
@@ -246,6 +255,25 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(ui.stage_device)
         self.assertIsNone(ui.scope_device)
 
+    def test_shutdown_does_not_apply_cw_park_commands_to_ttl_mode(self) -> None:
+        ui = PumpAutoUI.__new__(PumpAutoUI)
+        ui.config = deepcopy(DEFAULT_CONFIG)
+        ui.live_system = None
+        ui.laser_device = Mock()
+        ui.laser_mode = "ttl"
+        ui.awg_device = None
+        ui.stage_device = None
+        ui.scope_device = None
+        ui.cw_park = Mock()
+        laser = ui.laser_device
+
+        self.assertEqual(ui._close_dashboard_devices(park_laser=True), [])
+
+        ui.cw_park.get.assert_not_called()
+        laser.disable_internal_cw.assert_not_called()
+        laser.close.assert_called_once()
+        self.assertIsNone(ui.laser_device)
+
     def test_manual_awg_burst_turns_output_off_and_disarms(self) -> None:
         ui = PumpAutoUI.__new__(PumpAutoUI)
         ui.config = deepcopy(DEFAULT_CONFIG)
@@ -268,6 +296,24 @@ class CoreTests(unittest.TestCase):
         ui.awg_device.trigger.assert_called_once()
         ui.awg_device.output.assert_called_once_with(False)
         ui._disarm_session.assert_called_once()
+
+    def test_manual_awg_output_off_invalidates_the_pulse_configuration(self) -> None:
+        ui = PumpAutoUI.__new__(PumpAutoUI)
+        ui.config = deepcopy(DEFAULT_CONFIG)
+        ui.awg_device = Mock(identity="DG1062Z")
+        ui.awg_output_enabled = True
+        ui.awg_pulse_configured = True
+        ui.awg_status = Mock()
+        ui.root = Mock()
+        ui.root.after.side_effect = lambda _delay, callback: callback()
+        ui.awg_lock = threading.Lock()
+        ui._device_worker = lambda _lock, _title, work: (work(), True)[1]
+
+        ui._awg_output(False)
+
+        ui.awg_device.configure_dc.assert_called_once_with(0.0)
+        ui.awg_device.output.assert_called_once_with(False)
+        self.assertFalse(ui.awg_pulse_configured)
 
     def test_connected_pixelink_model_is_supported(self) -> None:
         self.assertTrue(_is_supported_pixelink("D3011", "PL-D6218CU-CYL"))
@@ -427,6 +473,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(int(image.max()), 204)
         self.assertLess(camera.exposure_s, 0.01)
 
+    def test_pixelink_live_exposure_is_applied_and_bounded(self) -> None:
+        camera = PixelinkCamera.__new__(PixelinkCamera)
+        camera.exposure_limits = (1e-5, 0.1)
+        camera._set_exposure = Mock(return_value=0.005)
+
+        self.assertEqual(camera.set_exposure(5.0, False), 5.0)
+        self.assertFalse(camera.auto_exposure)
+        camera._set_exposure.assert_called_once_with(0.005)
+        with self.assertRaisesRegex(ValueError, "between"):
+            camera.set_exposure(101.0, False)
+
     def test_pixelink_stream_start_and_stop_are_idempotent(self) -> None:
         camera = PixelinkCamera.__new__(PixelinkCamera)
         camera.api = Mock()
@@ -479,8 +536,8 @@ class CoreTests(unittest.TestCase):
                     key = command[1:]
                 else:
                     key, value = command.split("=", 1)
-                    blocked_pp = key == "PP" and self.values["LE"] == "0"
-                    if not blocked_pp:
+                    blocked_in_standby = key in ("PP", "PUL") and self.values["LE"] == "0"
+                    if not blocked_in_standby:
                         self.values[key] = value
                         if key == "LP":
                             self.values["LPS"] = value
@@ -493,11 +550,13 @@ class CoreTests(unittest.TestCase):
         laser = Stradus639160.__new__(Stradus639160)
         laser.device = FakeStradus()
         laser.emission_settle_s = 0.0
-        status = laser.prepare(12.5)
+        with self.assertRaisesRegex(RuntimeError, "Prepare TTL pulse mode"):
+            laser.prepare(12.5)
+        status = laser.prepare(12.5, allow_beam_blocked_mode_change=True)
         self.assertEqual(status["fault_code"], 1)
         self.assertEqual(status["pul"], 1)
         self.assertAlmostEqual(status["peak_power_mw"], 12.5)
-        self.assertLess(laser.device.commands.index("PUL=1"), laser.device.commands.index("LE=1"))
+        self.assertLess(laser.device.commands.index("LE=1"), laser.device.commands.index("PUL=1"))
         self.assertFalse(any("CH2" in command.upper() for command in laser.device.commands))
 
     def test_internal_cw_uses_stradus_only_and_returns_to_park(self) -> None:
@@ -517,9 +576,10 @@ class CoreTests(unittest.TestCase):
                     key = command[1:]
                 else:
                     key, value = command.split("=", 1)
-                    self.values[key] = value
-                    if key == "LP":
-                        self.values["LPS"] = value
+                    if key != "PUL" or self.values["LE"] == "1":
+                        self.values[key] = value
+                        if key == "LP":
+                            self.values["LPS"] = value
                 self.pending = f"{key}={self.values[key]}\r\n"
                 return command + "\r\n"
 
@@ -533,6 +593,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(status["pul"], 0)
         self.assertEqual(status["emission_enabled"], 1)
         self.assertAlmostEqual(status["laser_power_setting_mw"], 8.0)
+        le_on = laser.device.commands.index("LE=1")
+        self.assertIn("PUL=0", laser.device.commands[le_on + 1:])
         laser.disable_internal_cw(1.0)
         self.assertEqual(laser.device.values["LE"], "0")
         self.assertAlmostEqual(float(laser.device.values["LPS"]), 1.0)
@@ -548,9 +610,11 @@ class CoreTests(unittest.TestCase):
         laser.safe_off.assert_not_called()
 
     def test_laser_tab_does_not_open_or_control_the_awg(self) -> None:
-        source = inspect.getsource(PumpAutoUI._cw_on) + inspect.getsource(PumpAutoUI._cw_off)
+        source = "".join(
+            inspect.getsource(method)
+            for method in (PumpAutoUI._cw_on, PumpAutoUI._cw_off, PumpAutoUI._ttl_on, PumpAutoUI._ttl_off)
+        )
         self.assertNotIn("open_awg", source)
-        self.assertNotIn("awg_device", source)
 
     def test_read_only_stradus_disconnect_sends_no_laser_command(self) -> None:
         laser = Stradus639160.__new__(Stradus639160)
@@ -562,7 +626,7 @@ class CoreTests(unittest.TestCase):
         laser.device.close.assert_called_once_with()
         laser.rm.close.assert_called_once_with()
 
-    def test_stradus_safe_off_disables_emission_before_pul(self) -> None:
+    def test_stradus_safe_off_preserves_modulation_mode(self) -> None:
         class FakeStradus:
             def __init__(self) -> None:
                 self.commands: list[str] = []
@@ -587,7 +651,7 @@ class CoreTests(unittest.TestCase):
         laser = Stradus639160.__new__(Stradus639160)
         laser.device = FakeStradus()
         laser.safe_off()
-        self.assertEqual(laser.device.commands, ["LE=0", "?LE", "PUL=0"])
+        self.assertEqual(laser.device.commands, ["LE=0", "?LE"])
 
     def test_stradus_usb_drains_stale_responses_without_sending_more_commands(self) -> None:
         device = _StradusUSBDevice.__new__(_StradusUSBDevice)
@@ -697,6 +761,17 @@ class CoreTests(unittest.TestCase):
         scope.device = device
         self.assertEqual(scope.status()[":CHAN1:IMP?"], "50")
 
+    def test_scope_preflight_configures_detector_input(self) -> None:
+        scope = RigolMSO7054.__new__(RigolMSO7054)
+        scope.channel = 1
+        scope.device = Mock()
+        scope.configure_detector_input({"coupling": "DC", "input_impedance": "FIFTy"})
+        self.assertEqual(
+            [call.args[0] for call in scope.device.write.call_args_list],
+            [":CHAN1:COUP DC", ":CHAN1:IMP FIFTy"],
+        )
+        scope.device.query.assert_called_once_with("*OPC?")
+
     def test_preflight_report_is_persisted_with_checks_and_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             ui = PumpAutoUI.__new__(PumpAutoUI)
@@ -757,18 +832,47 @@ class CoreTests(unittest.TestCase):
         class FakeAWG:
             def __init__(self) -> None:
                 self.commands: list[str] = []
+                self.output = "OFF"
+                self.burst = "OFF"
 
             def write(self, command: str) -> None:
                 self.commands.append(command)
+                if command.startswith(":OUTP1 "):
+                    self.output = command.rsplit(" ", 1)[1]
+                    if self.output == "ON":
+                        self.burst = "OFF"
+                elif command == ":SOUR1:BURS ON":
+                    self.burst = "ON"
+
+            def query(self, command: str) -> str:
+                return {
+                    ":OUTP1?": self.output,
+                    ":OUTP1:LOAD?": "50",
+                    ":SOUR1:FUNC?": "PULS",
+                    ":SOUR1:FREQ?": "1e6",
+                    ":SOUR1:FUNC:PULS:WIDT?": "20e-9",
+                    ":SOUR1:VOLT:LOW?": "0",
+                    ":SOUR1:VOLT:HIGH?": "5",
+                    ":SOUR1:BURS?": self.burst,
+                    ":SOUR1:BURS:MODE?": "TRIG",
+                    ":SOUR1:BURS:NCYC?": "3",
+                    ":SOUR1:BURS:TRIG:SOUR?": "MAN",
+                    ":SOUR1:BURS:IDLE?": "BOTTOM",
+                    ":SYST:ERR?": '0,"No error"',
+                }[command]
 
         awg = RigolDG1062Z.__new__(RigolDG1062Z)
         awg.channel = 1
         awg.load_ohm = 50
         awg.device = FakeAWG()
-        awg.configure_pulse(20e-9, 5.0, 0.0, 3, 1e6)
-        self.assertEqual(awg.device.commands[0], ":OUTP1:LOAD 50")
+        status = awg.configure_pulse(20e-9, 5.0, 0.0, 3, 1e6)
+        self.assertEqual(awg.device.commands[0], ":OUTP1 OFF")
         self.assertIn(":SOUR1:BURS:NCYC 3", awg.device.commands)
-        self.assertEqual(awg.device.commands[-2:], [":SOUR1:BURS:TRIG:SOUR MAN", ":SOUR1:BURS ON"])
+        self.assertIn(":SOUR1:BURS:IDLE BOTTOM", awg.device.commands)
+        self.assertEqual(status["idle"], "BOTTOM")
+        with self.assertRaisesRegex(RuntimeError, "not ready"):
+            awg.trigger()
+        awg.output(True)
         awg.trigger()
         self.assertEqual(awg.device.commands[-1], ":SOUR1:BURS:TRIG")
         awg.device.commands.clear()
@@ -793,6 +897,20 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds the configured"):
             validate_recipe(Recipe("long", point, 1e-6, 1.0, 4, 5.0, 10.0), config)
 
+    def test_default_awg_limits_allow_long_pulses_and_bursts(self) -> None:
+        safety = DEFAULT_CONFIG["safety"]
+        self.assertEqual(safety["max_pulse_width_s"], 1.0)
+        self.assertEqual(safety["max_burst_duration_s"], 1000.0)
+        point = [Point(10, 10, 10)]
+        validate_recipe(Recipe("one-second", point, 1.0, 0.5, 1, 5.0, 10.0), DEFAULT_CONFIG)
+        exact_limit_hz = 999.0 / 999.5
+        validate_recipe(
+            Recipe("long-burst", point, 0.5, exact_limit_hz, 1000, 5.0, 10.0),
+            DEFAULT_CONFIG,
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds the configured"):
+            validate_recipe(Recipe("too-long", point, 0.5, 0.999, 1000, 5.0, 10.0), DEFAULT_CONFIG)
+
     def test_simulated_scope_requires_arm_and_awg_trigger(self) -> None:
         awg = SimAWG()
         scope = SimScope(awg)
@@ -813,6 +931,9 @@ class CoreTests(unittest.TestCase):
         settings = scope_settings_for_pulse(1e-6, DEFAULT_CONFIG["scope"], 1)
         self.assertAlmostEqual(settings["time_scale_s_div"], 0.6e-6)
         self.assertEqual(settings["input_impedance"], "FIFTy")
+        long_settings = scope_settings_for_pulse(1.0, DEFAULT_CONFIG["scope"], 1)
+        self.assertAlmostEqual(long_settings["time_scale_s_div"], 0.6)
+        self.assertEqual(DEFAULT_CONFIG["scope"]["acquisition_timeout_s"], 10.0)
 
         class FakeRigol:
             def __init__(self) -> None:
@@ -889,6 +1010,23 @@ class CoreTests(unittest.TestCase):
         self.assertAlmostEqual(actual.y_um, 10.0, places=3)
         self.assertAlmostEqual(actual.z_um, 20.0)
 
+    def test_bpc303_clamps_zero_readback_noise_before_motion(self) -> None:
+        stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
+        stage.api = Mock()
+        stage.api.PBC_SetPosition.return_value = 0
+        stage.serial = b"71524504"
+        stage.channels = {"x": 1, "y": 2, "z": 3}
+        stage.ranges = {axis: [0.0, 20.0] for axis in "xyz"}
+        stage.controller_span = [0.0, 100.0]
+        stage.axis_inverted = {axis: False for axis in "xyz"}
+        stage.position_tolerance_um = 0.1
+        stage.move_timeout_s = 1.0
+        stage.get_position = Mock(return_value=Point(-0.0061, 10.0, 10.0))
+
+        stage.move_to(Point(-0.0061, 10.0, 10.0))
+
+        self.assertEqual(stage.api.PBC_SetPosition.call_args_list[0].args[2], 0)
+
     def test_bpc303_move_times_out_before_continuing_at_wrong_position(self) -> None:
         stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
         stage.api = Mock()
@@ -923,6 +1061,25 @@ class CoreTests(unittest.TestCase):
         stage.api.PBC_SetPosition.assert_not_called()
         stage.api.PBC_EnableChannel.assert_not_called()
 
+    def test_bpc303_explicitly_enables_closed_loop_without_writing_position(self) -> None:
+        stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
+        stage.api = Mock()
+        stage.api.PBC_GetMaxOutputVoltage.return_value = 750
+        stage.api.PBC_GetMaximumTravel.return_value = 200
+        stage.api.PBC_GetPositionControlMode.side_effect = [1, 2, 2]
+        stage.api.PBC_SetPositionControlMode.return_value = 0
+        stage.api.PBC_GetPosition.return_value = 16384
+        stage.serial = b"71524504"
+        stage.ranges = {axis: [0.0, 20.0] for axis in "xyz"}
+        stage.channel_status = {}
+
+        with patch("pumpauto.instruments.time.sleep"):
+            stage._prepare_channel("x", 1, 75.0, enable_channel=False, set_closed_loop=True)
+
+        stage.api.PBC_SetPositionControlMode.assert_called_once_with(stage.serial, 1, 2)
+        stage.api.PBC_SetPosition.assert_not_called()
+        stage.api.PBC_EnableChannel.assert_not_called()
+
     def test_bpc303_preflight_reads_closed_loop_state_without_enabling_channel(self) -> None:
         stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
         stage.api = Mock()
@@ -941,7 +1098,7 @@ class CoreTests(unittest.TestCase):
         stage.api.PBC_SetPosition.assert_not_called()
         self.assertEqual(stage.channel_status["x"]["closed_loop_mode"], 2)
 
-    def test_bpc303_rejects_stale_negative_position(self) -> None:
+    def test_bpc303_reports_signed_negative_position(self) -> None:
         stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
         stage.api = Mock()
         stage.api.PBC_GetPosition.side_effect = [-6633, 0, 0]
@@ -952,8 +1109,28 @@ class CoreTests(unittest.TestCase):
         stage.axis_inverted = {axis: False for axis in "xyz"}
 
         with patch("pumpauto.instruments.time.sleep"):
-            with self.assertRaisesRegex(HardwareUnavailable, "invalid closed-loop position"):
-                stage.get_position()
+            position = stage.get_position()
+
+        self.assertAlmostEqual(position.x_um, -4.048585467085787)
+
+    def test_bpc303_status_blocks_position_outside_configured_range(self) -> None:
+        stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
+        stage.ranges = {axis: [0.0, 20.0] for axis in "xyz"}
+        stage.position_tolerance_um = 0.1
+        stage.channel_status = {}
+        stage.get_position = Mock(return_value=Point(-3.846, 10.0, 10.0))
+
+        with self.assertRaisesRegex(HardwareUnavailable, "zero that channel"):
+            stage.status()
+
+    def test_bpc303_status_accepts_zero_noise_within_tolerance(self) -> None:
+        stage = KinesisBPC303Stage.__new__(KinesisBPC303Stage)
+        stage.ranges = {axis: [0.0, 20.0] for axis in "xyz"}
+        stage.position_tolerance_um = 0.1
+        stage.channel_status = {}
+        stage.get_position = Mock(return_value=Point(-0.0061, 0.0, 0.0))
+
+        self.assertAlmostEqual(stage.status()["position_um"]["x"], -0.0061)
 
     def test_focus_plane_fit_and_raster_correction(self) -> None:
         points = [
@@ -1010,6 +1187,20 @@ class CoreTests(unittest.TestCase):
         ).astype(np.uint8)
         measured = measure_spot(image, 0.1)
         self.assertAlmostEqual(measured.w_major_px, 8.0, delta=0.4)
+        rgb = np.zeros((101, 101, 3), dtype=float)
+        rgb[..., 0], rgb[..., 1], rgb[..., 2] = 20, 35, 150
+        rgb[..., 2] += 90 * np.exp(-2 * ((xx - 25) ** 2 + (yy - 30) ** 2) / 14.0**2)
+        rgb[..., 0] += 190 * np.exp(-2 * ((xx - 70.2) ** 2 + (yy - 61.4) ** 2) / 5.0**2)
+        red_spot = measure_spot(np.clip(rgb, 0, 255).astype(np.uint8), 0.1)
+        self.assertAlmostEqual(red_spot.x_px, 70.2, delta=0.3)
+        self.assertAlmostEqual(red_spot.y_px, 61.4, delta=0.3)
+        self.assertAlmostEqual(red_spot.w_major_px, 5.0, delta=0.5)
+        edge_measurements = []
+        for width in (8.0, 7.0, 6.0):
+            frame = (10 + 180 * np.exp(-2 * ((xx - 50) ** 2 + (yy - 50) ** 2) / width**2)).astype(np.uint8)
+            edge_measurements.append(measure_spot(frame, 0.1))
+        with self.assertRaisesRegex(ValueError, "Focus not bracketed"):
+            fit_focus([8.0, 9.0, 10.0], edge_measurements)
         system = create_system(DEFAULT_CONFIG)
         try:
             result, _ = autofocus(

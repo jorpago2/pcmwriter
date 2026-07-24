@@ -6,10 +6,10 @@
     "min_high_v": 3.5,
     "max_high_v": 5.0,
     "min_pulse_width_s": 1e-8,
-    "max_pulse_width_s": 0.01,
+    "max_pulse_width_s": 1.0,
     "max_optical_power_mw": 160.0,
     "max_pulses": 1000,
-    "max_burst_duration_s": 10.0,
+    "max_burst_duration_s": 1000.0,
     "max_points": 10000
   },
   "awg": {
@@ -42,7 +42,7 @@
     "trigger_level_v": 0.1,
     "trigger_slope": "POSitive",
     "window_factor": 6.0,
-    "acquisition_timeout_s": 2.0
+    "acquisition_timeout_s": 10.0
   },
   "photodetector": {
     "model": "Thorlabs DET02AFC",
@@ -75,7 +75,7 @@
     "roi": [0, 0, 0, 0],
     "auto_exposure": true,
     "target_peak_fraction": 0.85,
-    "min_exposure_ms": 0.01,
+    "min_exposure_ms": 4.183,
     "max_exposure_ms": 100.0,
     "max_auto_exposure_steps": 4,
     "capture_retries": 4,

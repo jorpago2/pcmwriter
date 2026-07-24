@@ -90,6 +90,7 @@ FIELD_HELP = {
     "ROI left,top,width,height": "Pixelink ROI in pixels. Values must be non-negative integers; 0,0,0,0 selects the full sensor, otherwise width and height must both be >0.",
     "CW setpoint LP (mW)": "Feedback-regulated Stradus head power in CW mode. Range: >0 to {max_power:g} mW. It is not calibrated sample power.",
     "Park power (mW)": "Low Stradus LPS stored before shutdown and used at the next start. Range: >0 to {max_power:g} mW; establish it with the beam blocked.",
+    "TTL peak PP (mW)": "Stradus peak power in digital-modulation mode. Range: >0 to {max_power:g} mW; this is laser-head power, not calibrated sample power.",
     "DC level (V)": "Constant AWG output level. Range: {low_v:g}–{high_v:g} V; changing a live output requires armed hardware.",
     "Pulse width (s)": "Manual AWG pulse high time. Range: {min_width_s:g}–{max_width_s:g} s; DG1062Z minimum is 16 ns.",
     "Repetition (Hz)": "Manual AWG burst frequency. Must be >0, below the selected generator limit, and keep duty cycle below 90%.",
@@ -244,7 +245,9 @@ Inspect the sample and laser spot continuously, select a region of interest, det
 - The Pixelink image is expected to look blue because the DMSP550 dichroic suppresses the red pump light before the camera.
 
 ## Auto exposure
+- Exposure can be changed while the live stream is running. Enter milliseconds and select Apply exposure; the update is performed between frames without reconnecting the camera.
 - Auto exposure first reduces exposure time and then gain when pixels approach the saturation threshold.
+- Disable anti-saturation auto exposure to hold the entered exposure exactly.
 - Saturated frames are reported and should not be used for spot size, autofocus or colorimetry.
 - Avoid automatic white balance: phase-change color metrics depend on preserving the same RGB response before and after exposure.
 
@@ -270,7 +273,9 @@ Prepare, enable and disable the Stradus 639-160 independently from camera acquis
 
 ## Operating mode
 - The Laser tab uses internal feedback-regulated CW (`PUL=0`) with `LE` and `LP` commands.
-- It never opens, configures or locks the AWG. Digital pulse generation remains entirely on the AWG and Recipe tabs.
+- Prepare TTL pulse mode is the only coordinated setup action: it forces the AWG to TTL low/output OFF before changing the Stradus from CW to digital modulation (`PUL=1`).
+- Enable TTL emission verifies `PUL=1`, `EPC=0`, `PP` and `LE=1` without opening or changing the AWG. The physical TTL input must already be LOW.
+- Digital pulse generation remains independent on the AWG and Recipe tabs after the laser is enabled.
 - The Stradus stores the last CW setpoint as `LPS` and starts from that value the next time emission is enabled.
 - PCMWriter therefore requires a validated low park power before normal CW operation.
 
@@ -278,8 +283,10 @@ Prepare, enable and disable the Stradus 639-160 independently from camera acquis
 - CW setpoint is the requested feedback-regulated laser-head power in milliwatts. It is not automatically the power reaching the sample.
 - Park power is the low `LPS` value stored immediately before shutdown and used at the next start.
 - Initialize park power is a one-time attended procedure with the beam physically blocked. The laser initially emits at the previously stored LPS, writes the selected park value, verifies it and switches emission off.
-- LASER ON refuses to start unless stored `LPS` already matches the park value. It starts at park power, waits for the built-in delay, then writes and verifies the requested CW power.
+- LASER ON refuses to start unless stored `LPS` already matches the park value. It enables emission, waits for the built-in delay, selects CW mode, then writes and verifies the requested CW power. If the previous mode was digital modulation, keep its TTL input LOW or physically block the beam during this transition.
 - LASER OFF first writes and verifies park power, then sends and verifies `LE=0`.
+- Prepare TTL pulse mode requires the beam to be physically blocked because a Stradus starting in CW can briefly emit its stored `LPS` during the startup delay. It verifies `PUL=1`, then returns to `LE=0` while preserving digital-modulation mode.
+- ENABLE TTL EMISSION arms the laser head for external TTL gating and leaves the AWG unchanged. DISABLE TTL EMISSION verifies `LE=0` and preserves `PUL=1`.
 - Refresh status reads identity, fault, interlock, control mode, emission state, modulation mode and stored power values without enabling emission.
 
 ## Concurrency
@@ -308,6 +315,7 @@ Control the configured Rigol DG1062Z or Teledyne LeCroy T3AFG350 directly withou
 
 ## Pulse mode
 - Configure pulse uses the width, repetition rate, high level, low level and pulse count shown on this tab.
+- DG1062Z configuration is accepted only after the instrument reads back pulse function, frequency, width, levels, 50-ohm load, N-cycle count, manual trigger and a zero-volt burst idle level without an SCPI error.
 - Trigger sends one manual N-cycle burst after configuration and output enable.
 - Instrument-specific minimum pulse width, maximum repetition rate, duty cycle, train duration and configured safety levels are validated before programming the AWG.
 
@@ -315,7 +323,7 @@ Control the configured Rigol DG1062Z or Teledyne LeCroy T3AFG350 directly withou
 The AWG has its own lock, so camera frames, laser commands, stage jogs and scope acquisition continue while VISA commands execute. Laser ON/OFF never opens or locks the AWG.
 
 ## Safety
-The Stradus digital input is 50 ohms. Keep the configured source load at 50 ohms and TTL levels within the validated range. Output OFF does not replace the laser interlock. PCMWriter always attempts DC low before disabling or closing the AWG.
+The Stradus digital input is 50 ohms. Keep the configured source load at 50 ohms and TTL levels within the validated range. Selecting DC or Output OFF invalidates the previous pulse configuration, so Configure pulse must be repeated. Output OFF does not replace the laser interlock.
 """,
     ),
     "stage": (
@@ -326,7 +334,9 @@ The Stradus digital input is 50 ohms. Keep the configured source load at 50 ohms
 Connect the Thorlabs BPC303 and move the MAX311D/M piezos manually without tying motion to the live-camera loop. Stage commands run independently from camera, laser, AWG and scope workers.
 
 ## Connection
-- Connect loads the configured Kinesis installation, opens the configured BPC303 serial number and verifies that all three channels are already in closed-loop position mode. PCMWriter never changes control mode or writes a zero position merely by connecting.
+- Enable closed loop is an explicit setup action for all three channels. It requires confirmation because changing feedback mode can shift the stage; it never writes a zero or target position.
+- Connect loads the configured Kinesis installation, opens the configured BPC303 serial number and verifies that all three channels are in closed-loop position mode.
+- A signed position outside the configured travel is reported rather than clamped. Clear the objective and zero the affected channel from the BPC303 front panel or Kinesis before rerunning Diagnostics.
 - Disconnect releases the controller after any active jog completes.
 - The current X, Y and Z positions are read from the controller and displayed in micrometres.
 
@@ -520,7 +530,7 @@ Configure device connections, verify drivers and communications, define safety g
 
 ## Safe preflight behaviour
 - Diagnostics forces AWG channel 1 and the Stradus output off before identification.
-- It verifies the AWG output (and the Rigol AWG error queue), complete Stradus safety state, oscilloscope impedance/settings/error queue, BPC303 closed-loop state and position, and camera settings.
+- It verifies the AWG output (and the Rigol AWG error queue), complete Stradus safety state, configures the oscilloscope input to DC/50 ohm, verifies BPC303 closed-loop state and position, and checks camera settings.
 - It reports READY, MISSING or BLOCKED and writes a timestamped JSON report in the results folder.
 - It does not move the MAX stage, fire a pulse or treat a thermal prediction as authorization.
 
@@ -548,9 +558,9 @@ Configure device connections, verify drivers and communications, define safety g
 ## Safety gates
 - Stage calibrated means the real origin, axis directions, travel and safe Z range have been physically verified. Do not enable it from documentation alone.
 - Hardware armed is enabled only after every preflight item is READY and only for the current application session. It is never stored as true in config.json.
-- Successful recipes and pulses automatically disarm the session. Equipment errors invalidate the preflight; intentional disconnects disarm but retain the valid preflight.
-- Changing a connection or rerunning Diagnostics disarms the session; run preflight again before arming the exact new configuration.
-- Saving configuration does not test hardware. Run diagnostics after every connection or driver change.
+- Successful recipes, pulses and equipment errors disarm the session but retain the valid preflight. Re-arm explicitly before the next real output.
+- Exposure, gain, ROI, pulse, power and scope acquisition settings do not invalidate Diagnostics.
+- Changing an instrument model/resource, channel, serial number, driver, stage calibration/mapping or verified scope input requires Diagnostics again.
 
 ## Recommended first laboratory session
 1. Install vendor drivers and confirm all devices in their vendor tools.
@@ -1159,13 +1169,14 @@ class PumpAutoUI:
             if getattr(self, "laser_device", None) is not None:
                 device = self.laser_device
                 try:
-                    if park_laser:
+                    if park_laser and getattr(self, "laser_mode", None) == "cw":
                         device.disable_internal_cw(float(self.cw_park.get()))
                 finally:
                     try:
                         device.close()
                     finally:
                         self.laser_device = None
+                        self.laser_mode = None
         except Exception as exc:
             errors.append(f"laser: {exc}")
         try:
@@ -1234,9 +1245,11 @@ class PumpAutoUI:
         self.awg_output_enabled = False
         self.awg_pulse_configured = False
         self._set_cw_controls(True)
+        self._set_ttl_controls(True)
         self._set_live_stage_controls("disabled")
         self.awg_status.set("Disconnected | output OFF requested")
         self.cw_status.set("Internal CW: OFF requested")
+        self.ttl_status.set("TTL emission: OFF requested")
         self.scope_status.set("Disconnected by SAFE ALL.")
         self.live_stage_position.set("Stage: disconnected by SAFE ALL")
         self.safe_all_button.configure(state="normal")
@@ -1461,7 +1474,6 @@ class PumpAutoUI:
         self._write_log("Starting...")
 
         def work() -> None:
-            failed = False
             try:
                 output = run_recipe(
                     recipe,
@@ -1473,7 +1485,6 @@ class PumpAutoUI:
                 self._write_log(f"Data saved to {output}")
                 self.root.after(0, lambda path=output: self._show_last_result(path))
             except Exception as exc:
-                failed = True
                 self._write_log(f"ERROR: {type(exc).__name__}: {exc}")
                 self.root.after(0, lambda message=str(exc): messagebox.showerror("Error", message))
             finally:
@@ -1483,9 +1494,7 @@ class PumpAutoUI:
                 self.root.after(0, lambda: self.live_button.configure(state="normal"))
                 self.root.after(0, lambda: self._set_focus_controls("normal"))
                 self.root.after(0, lambda: self.stop_button.configure(state="disabled"))
-                self.root.after(
-                    0, lambda invalid=failed: self._disarm_session(invalidate_preflight=invalid)
-                )
+                self.root.after(0, self._disarm_session)
 
         self._spawn_worker(work)
 
@@ -1553,7 +1562,6 @@ class PumpAutoUI:
         self._write_log("Preparing single optical pulse...")
 
         def work() -> None:
-            failed = False
             try:
                 result = fire_single_pulse(
                     power_mw, width_s, high_v, self.config, self._write_log
@@ -1563,7 +1571,6 @@ class PumpAutoUI:
                     f"PP={result['stradus_pp_mw']:g} mW, {result['pulse_width_s'] * 1e6:g} us."
                 )
             except Exception as exc:
-                failed = True
                 self._write_log(f"ERROR: {type(exc).__name__}: {exc}")
                 self.root.after(
                     0, lambda message=str(exc): messagebox.showerror("Single pulse", message)
@@ -1573,9 +1580,7 @@ class PumpAutoUI:
                 self.root.after(0, lambda: self.run_button.configure(state="normal"))
                 self.root.after(0, lambda: self.fire_button.configure(state="normal"))
                 self.root.after(0, lambda: self.live_button.configure(state="normal"))
-                self.root.after(
-                    0, lambda invalid=failed: self._disarm_session(invalidate_preflight=invalid)
-                )
+                self.root.after(0, self._disarm_session)
 
         self._spawn_worker(work)
 
@@ -1936,10 +1941,28 @@ class PumpAutoUI:
             text="0,0,0,0 uses the full sensor.",
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 10))
+        self.live_exposure = self._entry(
+            controls, 2, "Exposure (ms)", str(self.config["camera"]["exposure_ms"])
+        )
+        self.live_auto_exposure = tk.BooleanVar(value=self.config["camera"]["auto_exposure"])
+        live_auto = ttk.Checkbutton(
+            controls,
+            text="Anti-saturation auto exposure  ⓘ",
+            variable=self.live_auto_exposure,
+        )
+        self._helped(live_auto, "Anti-saturation auto exposure").grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 6)
+        )
+        ttk.Button(
+            controls,
+            text="Apply exposure",
+            command=self._apply_live_exposure,
+            style="Accent.TButton",
+        ).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         self.live_button = ttk.Button(
             controls, text="Start camera", command=self._start_live, style="Accent.TButton"
         )
-        self.live_button.grid(row=2, column=0, sticky="ew", pady=4)
+        self.live_button.grid(row=5, column=0, sticky="ew", pady=4)
         self.live_stop_button = ttk.Button(
             controls,
             text="Stop",
@@ -1947,10 +1970,10 @@ class PumpAutoUI:
             state="disabled",
             style="Danger.TButton",
         )
-        self.live_stop_button.grid(row=2, column=1, sticky="ew", pady=4)
+        self.live_stop_button.grid(row=5, column=1, sticky="ew", pady=4)
 
         status = ttk.LabelFrame(controls, text="Live readout", padding=10)
-        status.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        status.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         self.camera_status = tk.StringVar(value="Camera stopped")
         self.camera_spot = tk.StringVar(value="Spot: --")
         self.camera_snr = tk.StringVar(value="SNR: --")
@@ -1990,6 +2013,7 @@ class PumpAutoUI:
         self.live_stop_event = threading.Event()
         self.live_render_pending = False
         self.live_system: Any | None = None
+        self.live_exposure_request: tuple[float, bool] | None = None
         self.camera_lock = threading.Lock()
 
     def _build_laser(self) -> None:
@@ -2020,6 +2044,32 @@ class PumpAutoUI:
         ttk.Label(controls, textvariable=self.cw_status, wraplength=310).grid(
             row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(10, 0)
         )
+        pulse = ttk.LabelFrame(self.laser_body, text="TTL pulse mode", padding=14)
+        pulse.pack(fill="x", pady=(0, 8))
+        self.ttl_peak_power = self._entry(
+            pulse, 0, "TTL peak PP (mW)", str(self.config["laser"]["peak_power_mw"])
+        )
+        ttk.Button(
+            pulse,
+            text="Prepare TTL pulse mode (beam blocked)",
+            command=self._laser_prepare_ttl,
+            style="Danger.TButton",
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=3, pady=6)
+        self.ttl_on_button = ttk.Button(
+            pulse,
+            text="ENABLE TTL EMISSION",
+            command=self._ttl_on,
+            style="Danger.TButton",
+        )
+        self.ttl_on_button.grid(row=2, column=0, sticky="ew", padx=3, pady=6)
+        self.ttl_off_button = ttk.Button(
+            pulse, text="DISABLE TTL EMISSION", command=self._ttl_off, state="disabled"
+        )
+        self.ttl_off_button.grid(row=2, column=1, sticky="ew", padx=3, pady=6)
+        self.ttl_status = tk.StringVar(value="TTL mode: not verified")
+        ttk.Label(pulse, textvariable=self.ttl_status, wraplength=310).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=4, pady=(6, 0)
+        )
         details = ttk.LabelFrame(self.laser_body, text="State", padding=14)
         details.pack(fill="x")
         self.laser_details = tk.StringVar(
@@ -2030,6 +2080,7 @@ class PumpAutoUI:
         )
         self.laser_lock = threading.Lock()
         self.laser_device: Any | None = None
+        self.laser_mode: str | None = None
 
     def _build_awg(self) -> None:
         controls = ttk.LabelFrame(self.awg_body, text="Manual control", padding=14)
@@ -2069,6 +2120,12 @@ class PumpAutoUI:
         ttk.Button(connection, text="Connect", command=self._stage_connect).pack(side="left", padx=2)
         ttk.Button(connection, text="Disconnect", command=self._stage_disconnect).pack(side="left", padx=2)
         ttk.Button(connection, text="Refresh", command=self._stage_refresh).pack(side="left", padx=2)
+        ttk.Button(
+            connection,
+            text="Enable closed loop",
+            command=self._stage_enable_closed_loop,
+            style="Danger.TButton",
+        ).pack(side="left", padx=2)
         self.live_stage_step = self._entry(controls, 1, "Step (um)", "0.1")
         self.live_stage_buttons: list[ttk.Button] = []
         for row, axis in enumerate("XYZ", start=2):
@@ -2124,16 +2181,200 @@ class PumpAutoUI:
 
     def _device_error(self, title: str, message: str) -> None:
         if self.config["mode"] == "hardware":
-            self._disarm_session(invalidate_preflight=True)
+            self._disarm_session()
         messagebox.showerror(title, message)
 
     def _set_cw_controls(self, available: bool, laser_on: bool = False) -> None:
         self.cw_on_button.configure(state="normal" if available and not laser_on else "disabled")
         self.cw_off_button.configure(state="normal" if laser_on else "disabled")
 
+    def _set_ttl_controls(self, available: bool, laser_on: bool = False) -> None:
+        self.ttl_on_button.configure(state="normal" if available and not laser_on else "disabled")
+        self.ttl_off_button.configure(state="normal" if laser_on else "disabled")
+
+    def _laser_prepare_ttl(self) -> None:
+        if self.config["mode"] != "hardware" or not self.config["safety"]["hardware_armed"]:
+            messagebox.showerror("TTL pulse mode", "Select armed hardware mode in Diagnostics first.")
+            return
+        if self.laser_device is not None:
+            messagebox.showerror("TTL pulse mode", "Turn the CW laser OFF before preparing TTL mode.")
+            return
+        limit = min(160.0, float(self.config["safety"]["max_optical_power_mw"]))
+        try:
+            peak_mw = float(self.ttl_peak_power.get())
+            if not 0 < peak_mw <= limit:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "TTL pulse mode", f"Peak power must be between 0 and {limit:g} mW."
+            )
+            return
+        if not messagebox.askyesno(
+            "Prepare TTL pulse mode",
+            "PHYSICALLY BLOCK THE BEAM.\n\n"
+            "PCMWriter will force AWG CH1 to 0 V/output OFF, enable the Stradus through its "
+            "startup delay, select PUL=1, set PP, verify the state, and return to LE=0. "
+            "A laser currently in CW may briefly emit its stored LPS during this transition.\n\n"
+            "Confirm that the beam is blocked and laser safety controls are in place.",
+        ):
+            return
+        if not self.awg_lock.acquire(blocking=False):
+            messagebox.showerror("TTL pulse mode", "AWG is busy with another command.")
+            return
+        self.ttl_status.set("TTL mode: preparing with AWG output OFF...")
+
+        def work() -> None:
+            temporary_awg = self.awg_device is None
+            awg = self.awg_device
+            laser = None
+            try:
+                awg = awg or open_awg(self.config["awg"])
+                awg.output(False)
+                awg.configure_dc(float(self.config["awg"]["low_v"]))
+                awg.output(False)
+                self.awg_output_enabled = False
+                self.awg_pulse_configured = False
+                laser = Stradus639160(
+                    **{
+                        key: self.config["laser"][key]
+                        for key in ("visa_resource", "baud_rate", "timeout_ms", "emission_settle_s")
+                    }
+                )
+                laser.prepare(peak_mw, allow_beam_blocked_mode_change=True)
+                laser.safe_off()
+                status = laser.status()
+                if status["pul"] != 1 or status["emission_enabled"] != 0:
+                    raise RuntimeError(
+                        "The Stradus did not finish in safe TTL-ready state (PUL=1, LE=0)."
+                    )
+                detail = f"PUL=1 verified | LE=0 | PP={status['peak_power_mw']:g} mW"
+                self._write_log(f"TTL PULSE MODE PREPARED: {detail}.")
+                self.root.after(0, lambda value=detail: self.ttl_status.set(value))
+                self.root.after(0, lambda value=detail: self.laser_details.set(value))
+                self.root.after(0, lambda: self.awg_status.set("Connected | DC low | output OFF") if not temporary_awg else None)
+                self.root.after(0, self._disarm_session)
+            finally:
+                if laser is not None:
+                    try:
+                        laser.close()
+                    except Exception:
+                        pass
+                if temporary_awg and awg is not None:
+                    try:
+                        awg.close()
+                    except Exception:
+                        pass
+                self.awg_lock.release()
+
+        if not self._device_worker(self.laser_lock, "TTL pulse mode", work):
+            self.awg_lock.release()
+
+    def _ttl_on(self) -> None:
+        if self.config["mode"] != "hardware" or not self.config["safety"]["hardware_armed"]:
+            messagebox.showerror("TTL emission", "Select armed hardware mode in Diagnostics first.")
+            return
+        if self.laser_device is not None:
+            messagebox.showerror("TTL emission", "Turn the active laser mode OFF first.")
+            return
+        if getattr(self, "awg_output_enabled", False):
+            messagebox.showerror(
+                "TTL emission", "The connected AWG output is ON. Set it LOW/OFF first."
+            )
+            return
+        limit = min(160.0, float(self.config["safety"]["max_optical_power_mw"]))
+        try:
+            peak_mw = float(self.ttl_peak_power.get())
+            if not 0 < peak_mw <= limit:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "TTL emission", f"Peak power must be between 0 and {limit:g} mW."
+            )
+            return
+        if not messagebox.askyesno(
+            "Enable TTL emission",
+            f"Enable the Stradus in digital modulation at PP={peak_mw:g} mW?\n\n"
+            "The AWG is not controlled by this action. Confirm that its output is physically LOW "
+            "or that the beam is blocked before continuing. A TTL HIGH will produce laser output.\n\n"
+            "Confirm beam containment and eye protection.",
+        ):
+            return
+        self._set_cw_controls(False)
+        self._set_ttl_controls(False)
+        self.ttl_status.set("TTL emission: enabling; input must remain LOW...")
+
+        def work() -> None:
+            try:
+                self.laser_device = Stradus639160(
+                    **{
+                        key: self.config["laser"][key]
+                        for key in ("visa_resource", "baud_rate", "timeout_ms", "emission_settle_s")
+                    }
+                )
+                status = self.laser_device.prepare(peak_mw)
+                if self.safe_all_event.is_set():
+                    self.laser_device.close()
+                    self.laser_device = None
+                    return
+                self.laser_mode = "ttl"
+                detail = (
+                    f"TTL emission ENABLED | PUL={status['pul']} | LE={status['emission_enabled']} | "
+                    f"EPC=0 | PP={status['peak_power_mw']:g} mW"
+                )
+                self._write_log(detail)
+                self.root.after(0, lambda value=detail: self.ttl_status.set(value))
+                self.root.after(0, lambda value=detail: self.laser_details.set(value))
+                self.root.after(0, lambda: self._set_ttl_controls(True, True))
+            except Exception as exc:
+                if self.laser_device is not None:
+                    try:
+                        self.laser_device.close()
+                    except Exception:
+                        pass
+                    self.laser_device = None
+                self.laser_mode = None
+                self.root.after(0, lambda message=str(exc): self._device_error("TTL emission", message))
+                self.root.after(0, lambda: self.ttl_status.set("TTL emission: OFF or unknown"))
+                self.root.after(0, lambda: self._set_cw_controls(True))
+                self.root.after(0, lambda: self._set_ttl_controls(True))
+
+        if not self._device_worker(self.laser_lock, "TTL emission", work):
+            self._set_cw_controls(True)
+            self._set_ttl_controls(True)
+            self.ttl_status.set("TTL emission: busy")
+
+    def _ttl_off(self) -> None:
+        self._set_ttl_controls(False)
+        self.ttl_status.set("TTL emission: turning off...")
+
+        def work() -> None:
+            try:
+                if self.laser_device is not None:
+                    self.laser_device.close()
+                    self.laser_device = None
+                self.laser_mode = None
+                self._write_log("TTL EMISSION OFF: LE=0 verified.")
+                self.root.after(0, lambda: self.ttl_status.set("TTL ready mode retained | LE=0"))
+                self.root.after(0, lambda: self.laser_details.set("PUL=1 retained | LE=0 verified"))
+                self.root.after(0, lambda: self._set_cw_controls(True))
+                self.root.after(0, lambda: self._set_ttl_controls(True))
+            except Exception as exc:
+                self.root.after(0, lambda message=str(exc): self._device_error("TTL emission", message))
+                self.root.after(0, lambda: self.ttl_status.set("TTL state unknown; use hardware interlock"))
+                self.root.after(0, lambda: self._set_ttl_controls(False, True))
+            finally:
+                self.root.after(0, self._disarm_session)
+
+        if not self._device_worker(self.laser_lock, "TTL emission", work):
+            self._set_ttl_controls(False, True)
+            self.ttl_status.set("TTL emission: busy")
+
     def _cw_on(self) -> None:
         if self.config["mode"] != "hardware" or not self.config["safety"]["hardware_armed"]:
             messagebox.showerror("Live laser", "Select armed hardware mode in Diagnostics first.")
+            return
+        if self.laser_device is not None:
+            messagebox.showerror("Live laser", "Disable the active TTL or CW mode first.")
             return
         try:
             power_mw, park_mw = float(self.cw_power.get()), float(self.cw_park.get())
@@ -2147,10 +2388,13 @@ class PumpAutoUI:
             "Enable internal CW",
             f"Enable feedback-regulated CW at LP={power_mw:g} mW?\n\n"
             f"Stored LPS must already equal the {park_mw:g} mW park power. "
-            "The AWG is not used. Confirm beam containment and eye protection.",
+            "The AWG is not controlled. If the Stradus is currently in digital modulation, "
+            "its TTL input must be LOW (or the beam blocked) during the startup delay. "
+            "Confirm beam containment and eye protection.",
         ):
             return
         self._set_cw_controls(False)
+        self._set_ttl_controls(False)
         self.cw_status.set("CW laser: starting from park power...")
 
         def work() -> None:
@@ -2167,6 +2411,7 @@ class PumpAutoUI:
                     self.laser_device.close()
                     self.laser_device = None
                     return
+                self.laser_mode = "cw"
                 self._write_log(f"INTERNAL CW ON: LP={power_mw:g} mW.")
                 details = (
                     f"{self.laser_device.identity}\nLE={status['emission_enabled']} | "
@@ -2183,14 +2428,17 @@ class PumpAutoUI:
                     except Exception:
                         pass
                     self.laser_device = None
+                self.laser_mode = None
                 self.root.after(
                     0, lambda message=str(exc): self._device_error("Live laser", message)
                 )
                 self.root.after(0, lambda: self.cw_status.set("Live laser: OFF"))
                 self.root.after(0, lambda: self._set_cw_controls(True))
+                self.root.after(0, lambda: self._set_ttl_controls(True))
 
         if not self._device_worker(self.laser_lock, "Stradus", work):
             self._set_cw_controls(True)
+            self._set_ttl_controls(True)
             self.cw_status.set("CW laser: busy")
 
     def _awg_connect(self) -> None:
@@ -2261,6 +2509,7 @@ class PumpAutoUI:
                 self.awg_device = open_awg(self.config["awg"])
             if not enabled:
                 self.awg_device.configure_dc(float(self.config["awg"]["low_v"]))
+                self.awg_pulse_configured = False
             self.awg_device.output(enabled)
             self.awg_output_enabled = enabled
             self.root.after(0, lambda: self.awg_status.set(f"Connected: {self.awg_device.identity}\nOutput {'ON' if enabled else 'OFF'}"))
@@ -2308,11 +2557,13 @@ class PumpAutoUI:
                 self.awg_device = open_awg(self.config["awg"])
             self.awg_device.output(False)
             self.awg_output_enabled = False
-            self.awg_device.configure_pulse(width, high, low, count, frequency)
+            readback = self.awg_device.configure_pulse(width, high, low, count, frequency)
             self.awg_pulse_configured = True
             self.awg_burst_duration_s = duration
+            verified = " | readback verified | idle=0 V" if readback else ""
             self.root.after(0, lambda: self.awg_status.set(
-                f"Pulse configured | width={width:g} s | {frequency:g} Hz | {count} pulse(s)\nOutput OFF"
+                f"Pulse configured{verified} | width={width:g} s | {frequency:g} Hz | "
+                f"{count} pulse(s)\nOutput OFF"
             ))
 
         self._device_worker(self.awg_lock, "AWG", work)
@@ -2354,6 +2605,39 @@ class PumpAutoUI:
 
         self._device_worker(self.stage_lock, "Stage", work)
 
+    def _stage_enable_closed_loop(self) -> None:
+        if self.config["mode"] != "hardware":
+            messagebox.showerror("Stage", "Select hardware mode in Diagnostics first.")
+            return
+        if self.stage_device is not None:
+            messagebox.showerror("Stage", "Disconnect the BPC303 before changing control mode.")
+            return
+        if not messagebox.askyesno(
+            "Enable closed loop",
+            "Changing feedback mode can shift the stage.\n\n"
+            "Confirm that all piezo and feedback cables are connected, the objective is clear, "
+            "and Kinesis is closed. No zero or target position will be written.",
+        ):
+            return
+
+        def work() -> None:
+            stage = KinesisBPC303Stage(
+                self.config["stage"], enable_channels=False, set_closed_loop=True
+            )
+            try:
+                status = stage.status()
+                self.root.after(
+                    0,
+                    lambda: self.live_stage_position.set(
+                        f"Closed loop enabled on X/Y/Z. Rerun Diagnostics.\n{status['position_um']}"
+                    ),
+                )
+            finally:
+                stage.close()
+                self.root.after(0, lambda: self._disarm_session(invalidate_preflight=True))
+
+        self._device_worker(self.stage_lock, "Enable closed loop", work)
+
     def _stage_disconnect(self) -> None:
         def work() -> None:
             if self.stage_device is not None:
@@ -2376,6 +2660,7 @@ class PumpAutoUI:
 
     def _cw_off(self) -> None:
         self._set_cw_controls(False)
+        self._set_ttl_controls(False)
         self.cw_status.set("CW laser: storing park power and turning off...")
         try:
             park_mw = float(self.cw_park.get())
@@ -2390,10 +2675,12 @@ class PumpAutoUI:
                     self.laser_device.disable_internal_cw(park_mw)
                     self.laser_device.close()
                     self.laser_device = None
+                self.laser_mode = None
                 self._write_log(f"INTERNAL CW OFF: parked at {park_mw:g} mW.")
                 self.root.after(0, lambda: self.cw_status.set("Internal CW: OFF"))
                 self.root.after(0, lambda: self.laser_details.set(f"LE=0 verified | park LPS={park_mw:g} mW"))
                 self.root.after(0, lambda: self._set_cw_controls(True))
+                self.root.after(0, lambda: self._set_ttl_controls(True))
             except Exception as exc:
                 self.root.after(
                     0, lambda message=str(exc): self._device_error("Live laser", message)
@@ -2472,6 +2759,14 @@ class PumpAutoUI:
                     f"PP={status['peak_power_mw']:g} mW | LPS={status['laser_power_setting_mw']:g} mW"
                 )
                 self.root.after(0, lambda value=text: self.laser_details.set(value))
+                ttl_text = (
+                    f"TTL emission ENABLED | PP={status['peak_power_mw']:g} mW"
+                    if status["pul"] == 1 and status["emission_enabled"] == 1
+                    else "TTL ready mode retained | LE=0"
+                    if status["pul"] == 1
+                    else "TTL mode: PUL=0 (prepare required)"
+                )
+                self.root.after(0, lambda value=ttl_text: self.ttl_status.set(value))
             finally:
                 if temporary:
                     laser.disconnect()
@@ -2810,15 +3105,23 @@ class PumpAutoUI:
             pixel_size = float(self.pixel_size.get()) or 1.0
             if pixel_size <= 0:
                 raise ValueError
+            exposure_ms = float(self.live_exposure.get())
+            minimum = float(self.config["camera"]["min_exposure_ms"])
+            maximum = float(self.config["camera"]["max_exposure_ms"])
+            if not minimum <= exposure_ms <= maximum:
+                raise ValueError
         except ValueError:
             messagebox.showerror(
-                "Live camera", "ROI must be left,top,width,height; use 0,0,0,0 for the full image."
+                "Live camera",
+                "Check ROI and exposure. Exposure must be inside the configured camera limits.",
             )
             return
         if not self.camera_lock.acquire(blocking=False):
             messagebox.showerror("Live camera", "Camera is busy with another acquisition.")
             return
         self.config["camera"]["roi"] = roi
+        self.config["camera"]["exposure_ms"] = exposure_ms
+        self.config["camera"]["auto_exposure"] = bool(self.live_auto_exposure.get())
         self.live_stop_event.clear()
         self.live_render_pending = False
         self.live_button.configure(state="disabled")
@@ -2835,6 +3138,15 @@ class PumpAutoUI:
                 if hasattr(system.camera, "start_stream"):
                     system.camera.start_stream()
                 while not self.live_stop_event.is_set():
+                    request = self.live_exposure_request
+                    if request is not None:
+                        self.live_exposure_request = None
+                        try:
+                            system.camera.set_exposure(*request)
+                        except Exception as exc:
+                            self._post_ui(
+                                lambda message=str(exc): messagebox.showerror("Live camera", message)
+                            )
                     if self.live_render_pending:
                         self.live_stop_event.wait(0.02)
                         continue
@@ -2872,6 +3184,27 @@ class PumpAutoUI:
 
         self._spawn_worker(work)
 
+    def _apply_live_exposure(self) -> None:
+        minimum = float(self.config["camera"]["min_exposure_ms"])
+        maximum = float(self.config["camera"]["max_exposure_ms"])
+        try:
+            exposure_ms = float(self.live_exposure.get())
+            if not minimum <= exposure_ms <= maximum:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Live camera", f"Exposure must be between {minimum:g} and {maximum:g} ms."
+            )
+            return
+        auto = bool(self.live_auto_exposure.get())
+        self.config["camera"]["exposure_ms"] = exposure_ms
+        self.config["camera"]["auto_exposure"] = auto
+        self.live_exposure_request = (exposure_ms, auto)
+        if self.live_system is None:
+            self.camera_settings.set(
+                f"Exposure: {exposure_ms:g} ms | {'Auto' if auto else 'Manual'} (applies on start)"
+            )
+
     def _stop_live(self) -> None:
         self.live_stop_event.set()
         self.camera_status.set("Stopping camera...")
@@ -2887,6 +3220,7 @@ class PumpAutoUI:
         scale_known = float(self.pixel_size.get()) > 0
         exposure = settings.get("exposure_ms", "simulated")
         gain = settings.get("gain_db", "simulated")
+        exposure_mode = "Auto" if settings.get("auto_exposure", False) else "Manual"
         if measurement is None:
             warning = measurement_error
             self.camera_status.set("Spot unavailable")
@@ -2900,7 +3234,9 @@ class PumpAutoUI:
             self.camera_status.set("Saturation detected" if measurement.saturated else "Live")
             self.camera_spot.set(f"Spot: wx={wx:.3f}, wy={wy:.3f} {unit}")
             self.camera_snr.set(f"SNR: {measurement.snr:.1f}")
-        self.camera_settings.set(f"Exposure: {exposure} ms  |  Gain: {gain} dB")
+        self.camera_settings.set(
+            f"Exposure: {exposure} ms ({exposure_mode})  |  Gain: {gain} dB"
+        )
         if self.camera_figure is None:
             return
         preview, histogram_image, preview_stride = _live_preview_samples(image)
@@ -3368,7 +3704,6 @@ class PumpAutoUI:
             }
 
         def work() -> None:
-            failed = False
             try:
                 output = run_recipe(
                     recipe,
@@ -3381,7 +3716,6 @@ class PumpAutoUI:
                 self._guide_progress(f"Writing complete: {output}")
                 self.root.after(0, lambda path=output: self._show_last_result(path))
             except Exception as exc:
-                failed = True
                 self._guide_progress(f"ERROR: {type(exc).__name__}: {exc}")
                 self.root.after(0, lambda message=str(exc): messagebox.showerror("Waveguide writing", message))
             finally:
@@ -3390,9 +3724,7 @@ class PumpAutoUI:
                 self.root.after(0, lambda: self.guide_cancel_button.configure(state="disabled"))
                 self.root.after(0, lambda: self.run_button.configure(state="normal"))
                 self.root.after(0, lambda: self._set_focus_controls("normal"))
-                self.root.after(
-                    0, lambda invalid=failed: self._disarm_session(invalidate_preflight=invalid)
-                )
+                self.root.after(0, self._disarm_session)
 
         self._spawn_worker(work)
 
@@ -3404,8 +3736,8 @@ class PumpAutoUI:
         ttk.Label(
             self.diag_body,
             text=(
-                "Preflight forces C1 and the Stradus output OFF, identifies the equipment, and checks "
-                "drivers and interlocks. It never moves the stage."
+                "Preflight forces AWG C1 and Stradus output OFF, configures scope CH1 to DC/50 ohm, "
+                "and checks drivers and interlocks. It never moves the stage."
             ),
             wraplength=850,
         ).pack(anchor="w", pady=(0, 10))
@@ -3656,8 +3988,34 @@ class PumpAutoUI:
 
     @staticmethod
     def _preflight_key(config: dict[str, Any]) -> str:
-        comparable = deepcopy(config)
-        comparable["safety"]["hardware_armed"] = False
+        awg = config["awg"]
+        laser = config["laser"]
+        scope = config["scope"]
+        stage = config["stage"]
+        camera = config["camera"]
+        comparable = {
+            "mode": config["mode"],
+            "awg": {key: awg[key] for key in ("model", "visa_resource", "channel", "load_ohm")},
+            "laser": {key: laser[key] for key in ("visa_resource", "baud_rate")},
+            "scope": {
+                key: scope[key]
+                for key in ("visa_resource", "channel", "input_impedance", "coupling")
+            },
+            "stage": {
+                key: stage[key]
+                for key in (
+                    "serial_number",
+                    "kinesis_dir",
+                    "axis_channels",
+                    "range_um",
+                    "max_voltage_v",
+                    "calibrated",
+                    "controller_span_units",
+                    "axis_inverted",
+                )
+            },
+            "camera": {"serial_number": camera["serial_number"]},
+        }
         return json.dumps(comparable, sort_keys=True)
 
     def _persist_preflight_report(

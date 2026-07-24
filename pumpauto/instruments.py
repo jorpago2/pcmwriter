@@ -386,6 +386,7 @@ class RigolDG1062Z(_VisaAWG):
         self, resource: str, channel: int = 1, load_ohm: int = 50, timeout_ms: int = 5000
     ) -> None:
         super().__init__(resource, channel, load_ohm, timeout_ms)
+        self._pulse_configured = False
         if "DG1062Z" not in self.identity.upper():
             identity = self.identity
             self.device.close()
@@ -400,8 +401,10 @@ class RigolDG1062Z(_VisaAWG):
 
     def configure_pulse(
         self, width_s: float, high_v: float, low_v: float, count: int, repetition_hz: float
-    ) -> None:
+    ) -> dict[str, Any]:
         source = f":SOUR{self.channel}"
+        self._pulse_configured = False
+        self.output(False)
         self.device.write(f":OUTP{self.channel}:LOAD {self.load_ohm}")
         self.device.write(f"{source}:FUNC PULS")
         self.device.write(f"{source}:FREQ {float(repetition_hz)}")
@@ -412,16 +415,76 @@ class RigolDG1062Z(_VisaAWG):
         self.device.write(f"{source}:BURS:MODE TRIG")
         self.device.write(f"{source}:BURS:NCYC {int(count)}")
         self.device.write(f"{source}:BURS:TRIG:SOUR MAN")
+        self.device.write(f"{source}:BURS:IDLE BOTTOM")
         self.device.write(f"{source}:BURS ON")
+        status = self.pulse_status()
+        expected = {
+            "load_ohm": float(self.load_ohm),
+            "frequency_hz": float(repetition_hz),
+            "width_s": float(width_s),
+            "low_v": float(low_v),
+            "high_v": float(high_v),
+            "count": float(count),
+        }
+        numeric_ok = all(
+            np.isclose(float(status[key]), value, rtol=1e-6, atol=1e-12)
+            for key, value in expected.items()
+        )
+        state_ok = (
+            status["output"] == "OFF"
+            and status["function"].startswith("PULS")
+            and status["burst"] == "ON"
+            and status["burst_mode"].startswith("TRIG")
+            and status["trigger_source"].startswith("MAN")
+            and status["idle"].startswith("BOTT")
+            and status["error"].startswith("0,")
+        )
+        if not numeric_ok or not state_ok:
+            raise RuntimeError(f"DG1062Z pulse configuration readback failed: {status}")
+        self._pulse_configured = True
+        return status
+
+    def pulse_status(self) -> dict[str, Any]:
+        source = f":SOUR{self.channel}"
+        return {
+            "output": str(self.device.query(f":OUTP{self.channel}?")).strip().upper(),
+            "load_ohm": float(self.device.query(f":OUTP{self.channel}:LOAD?")),
+            "function": str(self.device.query(f"{source}:FUNC?")).strip().upper(),
+            "frequency_hz": float(self.device.query(f"{source}:FREQ?")),
+            "width_s": float(self.device.query(f"{source}:FUNC:PULS:WIDT?")),
+            "low_v": float(self.device.query(f"{source}:VOLT:LOW?")),
+            "high_v": float(self.device.query(f"{source}:VOLT:HIGH?")),
+            "burst": str(self.device.query(f"{source}:BURS?")).strip().upper(),
+            "burst_mode": str(self.device.query(f"{source}:BURS:MODE?")).strip().upper(),
+            "count": float(self.device.query(f"{source}:BURS:NCYC?")),
+            "trigger_source": str(
+                self.device.query(f"{source}:BURS:TRIG:SOUR?")
+            ).strip().upper(),
+            "idle": str(self.device.query(f"{source}:BURS:IDLE?")).strip().upper(),
+            "error": str(self.device.query(":SYST:ERR?")).strip(),
+        }
 
     def output(self, enabled: bool) -> None:
         self.device.write(f":OUTP{self.channel} {'ON' if enabled else 'OFF'}")
+        if enabled and getattr(self, "_pulse_configured", False):
+            self.device.write(f":SOUR{self.channel}:BURS ON")
 
     def configure_dc(self, level_v: float) -> None:
+        self._pulse_configured = False
         self.device.write(f":OUTP{self.channel}:LOAD {self.load_ohm}")
         self.device.write(f":SOUR{self.channel}:APPL:DC DEF,DEF,{float(level_v)}")
 
     def trigger(self) -> None:
+        status = self.pulse_status()
+        if (
+            status["output"] != "ON"
+            or not status["function"].startswith("PULS")
+            or status["burst"] != "ON"
+            or not status["trigger_source"].startswith("MAN")
+            or not status["idle"].startswith("BOTT")
+            or not status["error"].startswith("0,")
+        ):
+            raise RuntimeError(f"DG1062Z is not ready for a safe manual pulse: {status}")
         self.device.write(f":SOUR{self.channel}:BURS:TRIG")
 
     def status(self) -> dict[str, str]:
@@ -766,8 +829,8 @@ class _StradusUSBDevice:
 class Stradus639160:
     """Minimal USB HID/RS-232 adapter for the Vortran Stradus 639-160.
 
-    The AWG must already be OFF before ``prepare`` is called. Digital modulation
-    is enabled before laser emission so a low TTL keeps the optical output dark.
+    The AWG must already be OFF and at TTL low before ``prepare`` is called.
+    Changing from CW to digital modulation requires an explicit beam-blocked step.
     """
 
     def __init__(
@@ -828,7 +891,9 @@ class Stradus639160:
     def _set(self, command: str, key: str) -> str:
         return self._value(command, key)
 
-    def prepare(self, peak_power_mw: float) -> dict[str, Any]:
+    def prepare(
+        self, peak_power_mw: float, allow_beam_blocked_mode_change: bool = False
+    ) -> dict[str, Any]:
         peak = float(peak_power_mw)
         if not 0 < peak <= 160.0:
             raise ValueError("Stradus peak power must be between 0 and 160 mW.")
@@ -847,16 +912,23 @@ class Stradus639160:
             if int(self._value("?EPC", "EPC")) != 0:
                 raise RuntimeError("The Stradus did not disable external power control.")
 
-            self._set("PUL=1", "PUL")
-            if int(self._value("?PUL", "PUL")) != 1:
-                raise RuntimeError("The Stradus did not confirm Digital Modulation (PUL=1).")
-
+            pulse_mode = int(self._value("?PUL", "PUL"))
+            if pulse_mode != 1 and not allow_beam_blocked_mode_change:
+                raise RuntimeError(
+                    "The Stradus is in CW mode (PUL=0). With the beam blocked, use "
+                    "Prepare TTL pulse mode in the Laser card before running a pulse."
+                )
             emission_was_off = int(self._value("?LE", "LE")) != 1
             if emission_was_off:
                 self._set("LE=1", "LE")
                 if int(self._value("?LE", "LE")) != 1:
                     raise RuntimeError("The Stradus did not confirm LE=1.")
                 time.sleep(self.emission_settle_s)
+
+            if pulse_mode != 1:
+                self._set("PUL=1", "PUL")
+                if int(self._value("?PUL", "PUL")) != 1:
+                    raise RuntimeError("The Stradus did not confirm Digital Modulation (PUL=1).")
 
             self._set(f"PP={peak:.6g}", "PP")
             verified_peak = float(self._value("?PP", "PP"))
@@ -906,13 +978,13 @@ class Stradus639160:
             self._set("EPC=0", "EPC")
             if int(self._value("?EPC", "EPC")) != 0:
                 raise RuntimeError("The Stradus did not disable external power control.")
-            self._set("PUL=0", "PUL")
-            if int(self._value("?PUL", "PUL")) != 0:
-                raise RuntimeError("The Stradus did not confirm internal CW mode (PUL=0).")
             self._set("LE=1", "LE")
             if int(self._value("?LE", "LE")) != 1:
                 raise RuntimeError("The Stradus did not confirm LE=1.")
             time.sleep(self.emission_settle_s)
+            self._set("PUL=0", "PUL")
+            if int(self._value("?PUL", "PUL")) != 0:
+                raise RuntimeError("The Stradus did not confirm internal CW mode (PUL=0).")
             self._set(f"LP={power:05.1f}", "LP")
             verified = float(self._value("?LPS", "LPS"))
             if abs(verified - power) > max(0.6, power * 0.02):
@@ -963,13 +1035,13 @@ class Stradus639160:
             self._set("EPC=0", "EPC")
             if int(self._value("?EPC", "EPC")) != 0:
                 raise RuntimeError("The Stradus did not disable external power control.")
-            self._set("PUL=0", "PUL")
-            if int(self._value("?PUL", "PUL")) != 0:
-                raise RuntimeError("The Stradus did not confirm internal CW mode (PUL=0).")
             self._set("LE=1", "LE")
             if int(self._value("?LE", "LE")) != 1:
                 raise RuntimeError("The Stradus did not confirm LE=1.")
             time.sleep(self.emission_settle_s)
+            self._set("PUL=0", "PUL")
+            if int(self._value("?PUL", "PUL")) != 0:
+                raise RuntimeError("The Stradus did not confirm internal CW mode (PUL=0).")
             self._set(f"LP={park:05.1f}", "LP")
             stored = float(self._value("?LPS", "LPS"))
             if abs(stored - park) > max(0.6, park * 0.02):
@@ -987,10 +1059,6 @@ class Stradus639160:
         self._set("LE=0", "LE")
         if int(self._value("?LE", "LE")) != 0:
             raise RuntimeError("The Stradus did not confirm LE=0; use the hardware interlock.")
-        try:
-            self._set("PUL=0", "PUL")
-        except Exception:
-            pass
 
     def status(self) -> dict[str, Any]:
         fault = int(self._value("?FC", "FC"))
@@ -1050,6 +1118,16 @@ class RigolMSO7054:
             self.rm.close()
             raise HardwareUnavailable(f"Expected Rigol MSO7054, found {identity}.")
         self.settings: dict[str, Any] = {}
+
+    def configure_detector_input(self, config: dict[str, Any]) -> None:
+        """Apply the non-emitting CH input settings required by the DET02AFC."""
+        if str(config.get("input_impedance", "")).upper() != "FIFTY" or str(
+            config.get("coupling", "")
+        ).upper() != "DC":
+            raise ValueError("The DET02AFC requires scope coupling DC and input impedance FIFTy.")
+        self.device.write(f":CHAN{self.channel}:COUP DC")
+        self.device.write(f":CHAN{self.channel}:IMP FIFTy")
+        self.device.query("*OPC?")
 
     def configure_for_pulse(self, pulse_width_s: float, config: dict[str, Any]) -> dict[str, Any]:
         settings = scope_settings_for_pulse(pulse_width_s, config, self.channel)
@@ -1222,6 +1300,17 @@ class PixelinkCamera:
         low, high = self.exposure_limits
         return self._set(self.api.FeatureId.EXPOSURE, [min(high, max(low, exposure_s))])[0]
 
+    def set_exposure(self, exposure_ms: float, auto_exposure: bool) -> float:
+        requested = float(exposure_ms) / 1000.0
+        low, high = self.exposure_limits
+        if not low <= requested <= high:
+            raise ValueError(
+                f"Exposure must be between {1000.0 * low:g} and {1000.0 * high:g} ms."
+            )
+        self.auto_exposure = bool(auto_exposure)
+        self.exposure_s = self._set_exposure(requested)
+        return 1000.0 * self.exposure_s
+
     def _set_gain(self, gain_db: float) -> float:
         low, high = self.gain_limits
         return self._set(self.api.FeatureId.GAIN, [min(high, max(low, gain_db))])[0]
@@ -1326,7 +1415,12 @@ class PixelinkCamera:
 class KinesisBPC303Stage:
     """Native Kinesis adapter for the three piezo channels of a BPC303."""
 
-    def __init__(self, config: dict[str, Any], enable_channels: bool = True) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        enable_channels: bool = True,
+        set_closed_loop: bool = False,
+    ) -> None:
         if not config.get("calibrated", False):
             raise HardwareUnavailable(
                 "The stage is not calibrated: confirm travel, origin, and axis directions, then set stage.calibrated."
@@ -1360,7 +1454,11 @@ class KinesisBPC303Stage:
             time.sleep(0.3)
             for axis, channel in self.channels.items():
                 self._prepare_channel(
-                    axis, channel, float(config["max_voltage_v"]), enable_channels
+                    axis,
+                    channel,
+                    float(config["max_voltage_v"]),
+                    enable_channels,
+                    set_closed_loop,
                 )
         except Exception:
             self.close()
@@ -1396,7 +1494,12 @@ class KinesisBPC303Stage:
             function.restype = result
 
     def _prepare_channel(
-        self, axis: str, channel: int, max_voltage_v: float, enable_channel: bool = True
+        self,
+        axis: str,
+        channel: int,
+        max_voltage_v: float,
+        enable_channel: bool = True,
+        set_closed_loop: bool = False,
     ) -> None:
         self.api.PBC_RequestMaxOutputVoltage(self.serial, channel)
         self.api.PBC_RequestMaximumTravel(self.serial, channel)
@@ -1412,26 +1515,28 @@ class KinesisBPC303Stage:
                 f"{max_voltage_v:g} V and {expected_travel:g} um."
             )
         mode = self.api.PBC_GetPositionControlMode(self.serial, channel)
+        if mode not in (2, 4) and set_closed_loop:
+            result = self.api.PBC_SetPositionControlMode(self.serial, channel, 2)
+            if result != 0:
+                raise HardwareUnavailable(
+                    f"BPC303 rejected closed-loop mode for {axis}; code {result}."
+                )
+            self.api.PBC_RequestPositionControlMode(self.serial, channel)
+            time.sleep(0.25)
+            mode = self.api.PBC_GetPositionControlMode(self.serial, channel)
         if mode not in (2, 4):
             raise HardwareUnavailable(
-                f"BPC303 {axis} is not in closed-loop mode. Set it manually before connecting PCMWriter; "
-                "software connection never changes mode or position."
+                f"BPC303 {axis} is not in closed-loop mode. Use Enable closed loop in the Stage card."
             )
         if enable_channel and self.api.PBC_EnableChannel(self.serial, channel) != 0:
             raise HardwareUnavailable(f"Cannot enable BPC303 channel {axis}.")
 
         time.sleep(0.4)
         self.api.PBC_RequestPositionControlMode(self.serial, channel)
-        self.api.PBC_RequestActualPosition(self.serial, channel)
         time.sleep(0.3)
         confirmed_mode = self.api.PBC_GetPositionControlMode(self.serial, channel)
-        raw = self.api.PBC_GetPosition(self.serial, channel)
         if confirmed_mode not in (2, 4):
             raise HardwareUnavailable(f"BPC303 {axis} did not enter closed-loop mode.")
-        if not -328 <= raw <= 33095:
-            raise HardwareUnavailable(
-                f"BPC303 {axis} returned an invalid closed-loop position ({raw}); reconnect the stage."
-            )
         self.channel_status[axis] = {
             "channel": channel,
             "max_voltage_v": voltage,
@@ -1441,6 +1546,15 @@ class KinesisBPC303Stage:
 
     def status(self) -> dict[str, Any]:
         position = self.get_position()
+        for axis, value in (("x", position.x_um), ("y", position.y_um), ("z", position.z_um)):
+            low, high = self.ranges[axis]
+            if not low - self.position_tolerance_um <= value <= high + self.position_tolerance_um:
+                raise HardwareUnavailable(
+                    f"BPC303 {axis} position is {value:.4f} um, outside the configured "
+                    f"[{low:g}, {high:g}] um range and {self.position_tolerance_um:g} um tolerance. "
+                    "With the objective clear, zero that channel "
+                    "from the BPC303 front panel or Kinesis, then rerun Diagnostics."
+                )
         return {
             "channels": self.channel_status,
             "position_um": {"x": position.x_um, "y": position.y_um, "z": position.z_um},
@@ -1463,10 +1577,13 @@ class KinesisBPC303Stage:
         return low + fraction * (high - low)
 
     def move_to(self, target: Point) -> Point:
+        bounded: dict[str, float] = {}
         for axis, value in (("x", target.x_um), ("y", target.y_um), ("z", target.z_um)):
             low, high = self.ranges[axis]
-            if not low <= value <= high:
+            if not low - self.position_tolerance_um <= value <= high + self.position_tolerance_um:
                 raise ValueError(f"Motion {axis}={value} µm is outside [{low}, {high}].")
+            bounded[axis] = min(high, max(low, float(value)))
+        target = Point(bounded["x"], bounded["y"], bounded["z"])
         for axis, value in (("x", target.x_um), ("y", target.y_um), ("z", target.z_um)):
             controller = self._to_controller(axis, float(value))
             raw = int(round(controller * 32767.0 / 100.0))
@@ -1500,11 +1617,6 @@ class KinesisBPC303Stage:
         values = {}
         for axis, channel in self.channels.items():
             raw = self.api.PBC_GetPosition(self.serial, channel)
-            if not -328 <= raw <= 33095:
-                raise HardwareUnavailable(
-                    f"BPC303 {axis} returned an invalid closed-loop position ({raw}); reconnect the stage."
-                )
-            raw = min(32767, max(0, raw))
             values[axis] = self._from_controller(axis, raw * 100.0 / 32767.0)
         return Point(values["x"], values["y"], values["z"])
 
@@ -1582,7 +1694,7 @@ def discover_hardware(config: dict[str, Any]) -> list[tuple[str, str, str]]:
             laser.safe_off()
             status = laser.status()
             ready = status["fault_code"] in (0, 1) and status["interlock"] == 1 and status["control_mode"] == 0 and status["emission_enabled"] == 0
-            checks.append(("Stradus 639-160", "READY" if ready else "BLOCKED", f"{laser.identity}; LE=0 and PUL=0 requested; queries ?FC/?FD/?IL/?C/?EPC/?PUL/?LE/?LPS/?LP/?PP -> {status}"))
+            checks.append(("Stradus 639-160", "READY" if ready else "BLOCKED", f"{laser.identity}; LE=0 required, modulation mode preserved; queries ?FC/?FD/?IL/?C/?EPC/?PUL/?LE/?LPS/?LP/?PP -> {status}"))
         except Exception as exc:
             checks.append(("Stradus 639-160", "MISSING", str(exc)))
         finally:
@@ -1598,6 +1710,7 @@ def discover_hardware(config: dict[str, Any]) -> list[tuple[str, str, str]]:
                 resource=config["scope"]["visa_resource"],
                 **{k: config["scope"][k] for k in ("channel", "timeout_ms")},
             )
+            scope.configure_detector_input(config["scope"])
             status = scope.status()
             actual_impedance = status[f":CHAN{scope.channel}:IMP?"].upper()
             expected_impedance = str(config["scope"]["input_impedance"]).upper()
@@ -1605,9 +1718,9 @@ def discover_hardware(config: dict[str, Any]) -> list[tuple[str, str, str]]:
                 actual_impedance.startswith("50") or actual_impedance.startswith("FIFT")
             )
             ready = impedance_ready and error_is_clear(status[":SYST:ERR?"])
-            checks.append(("Rigol MSO7054", "READY" if ready else "BLOCKED", f"{scope.identity}; DET02AFC requires 50 ohm; queries={status}"))
+            checks.append(("Rigol MSO7054", "READY" if ready else "BLOCKED", f"{scope.identity}; DET02AFC input configured to DC/50 ohm; queries={status}"))
         except Exception as exc:
-            checks.append(("Rigol MSO7054", "MISSING", str(exc)))
+            checks.append(("Rigol MSO7054", "BLOCKED" if scope is not None else "MISSING", str(exc)))
         finally:
             close(scope)
 
@@ -1638,6 +1751,8 @@ def discover_hardware(config: dict[str, Any]) -> list[tuple[str, str, str]]:
                 try:
                     stage = KinesisBPC303Stage(config["stage"], enable_channels=False)
                     checks.append(("BPC303", "READY", f"{stage.identity}; channels not enabled; native status={stage.status()}"))
+                except HardwareUnavailable as exc:
+                    checks.append(("BPC303", "BLOCKED", str(exc)))
                 finally:
                     close(stage)
         except Exception as exc:

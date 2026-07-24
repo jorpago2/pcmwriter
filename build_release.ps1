@@ -21,10 +21,12 @@ if ($LASTEXITCODE -ne 0) { throw "Tests failed; release build stopped." }
 & $python -m pumpauto self-test
 if ($LASTEXITCODE -ne 0) { throw "Self-test failed; release build stopped." }
 
-& $python -m PyInstaller --clean --noconfirm PCMWriter.spec
+$workPath = Join-Path $env:TEMP "PCMWriter-build-$PID"
+$distPath = Join-Path $env:TEMP "PCMWriter-dist-$PID"
+& $python -m PyInstaller --clean --noconfirm --workpath $workPath --distpath $distPath PCMWriter.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 
-$bundle = "dist\PCMWriter"
+$bundle = Join-Path $distPath "PCMWriter"
 Copy-Item -LiteralPath "config.example.json" -Destination "$bundle\config.json"
 Copy-Item -LiteralPath "config.example.json" -Destination "$bundle\config.example.json"
 Copy-Item -LiteralPath "README.md", "LICENSE", "LAB_SETUP.md", "EQUIPMENT.md" -Destination $bundle
@@ -36,7 +38,16 @@ New-Item -ItemType Directory -Force -Path "release" | Out-Null
 $name = "PCMWriter-Windows-x64-v$Version.zip"
 $zip = Join-Path "release" $name
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
-Compress-Archive -Path "$bundle\*" -DestinationPath $zip -CompressionLevel Optimal
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        Compress-Archive -Path "$bundle\*" -DestinationPath $zip -CompressionLevel Optimal -ErrorAction Stop
+        break
+    } catch {
+        if ($attempt -eq 5) { throw }
+        if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+        Start-Sleep -Seconds 1
+    }
+}
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  $name" | Set-Content -Encoding ascii "$zip.sha256"
 
